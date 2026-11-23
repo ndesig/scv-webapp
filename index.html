@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SCV · Исполнил</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #17212b;
+    --text: #f5f5f5;
+    --hint: #8b9aa8;
+    --accent: #5288c1;
+    --accent-text: #ffffff;
+    --card: #232e3c;
+    --ok: #4caf50;
+    --warn: #ffb300;
+    --bad: #e53935;
+    color-scheme: light dark;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    min-height: 100vh;
+  }
+  body { padding: 16px 16px 24px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .card {
+    background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
+  .meta dt { color: var(--hint); }
+  .meta dd { margin: 0; font-weight: 600; }
+  label { display: block; font-size: 15px; color: var(--hint); margin-bottom: 6px; }
+  input[type="text"] {
+    width: 100%; font-size: 28px; font-weight: 600; padding: 12px 14px;
+    border: 2px solid transparent; border-radius: 12px; background: var(--bg); color: var(--text);
+    outline: none; font-variant-numeric: tabular-nums;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="text"].invalid { border-color: var(--bad); }
+  .field + .field { margin-top: 14px; }
+  .live { font-size: 15px; line-height: 1.5; }
+  .live .rate { font-size: 20px; font-weight: 700; }
+  .live .delta { font-weight: 700; }
+  .live .delta.ok { color: var(--ok); }
+  .live .delta.warn { color: var(--warn); }
+  .live .delta.bad { color: var(--bad); }
+  .muted { color: var(--hint); font-size: 13px; }
+  .status { margin-top: 10px; font-size: 14px; min-height: 18px; }
+  .status.error { color: var(--bad); }
+  button#send {
+    width: 100%; margin-top: 12px; font-size: 17px; font-weight: 600; padding: 14px;
+    border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text);
+  }
+  button#send:disabled { opacity: .45; }
+  .fallback-note { display: none; }
+  body.no-tg .fallback-note { display: block; }
+  body.tg #send { display: none; }
+</style>
+</head>
+<body>
+<h1>Исполнение сделки</h1>
+
+<div class="card">
+  <dl class="meta">
+    <dt>Маршрут</dt><dd id="route">—</dd>
+    <dt>Пара</dt><dd id="pair">—</dd>
+    <dt>Ступень</dt><dd id="lvl">—</dd>
+  </dl>
+</div>
+
+<div class="card">
+  <div class="field">
+    <label for="sell" id="sell-label">Продал</label>
+    <input type="text" id="sell" inputmode="decimal" autocomplete="off" placeholder="0">
+  </div>
+  <div class="field">
+    <label for="buy" id="buy-label">Купил</label>
+    <input type="text" id="buy" inputmode="decimal" autocomplete="off" placeholder="0">
+  </div>
+</div>
+
+<div class="card live" id="live">
+  <div class="muted">Введи обе суммы — здесь появится фактический курс сделки.</div>
+</div>
+
+<button id="send" disabled>Записать сделку</button>
+<div class="status" id="status"></div>
+<p class="muted fallback-note">Открыто вне Telegram: нажми «Записать сделку», команда будет скопирована.</p>
+
+<script>
+(function () {
+  var TG = (window.Telegram && window.Telegram.WebApp) || null;
+  var NUM_RE = /^\d+(?:[.,]\d+)?$/;
+  var params = new URLSearchParams(window.location.search);
+  var p = {
+    route: params.get("route") || "",
+    lvl: params.get("lvl") || "",
+    pair: params.get("pair") || "",
+    sell_coin: (params.get("sell_coin") || "").toUpperCase(),
+    buy_coin: (params.get("buy_coin") || "").toUpperCase(),
+    hint_rate: params.get("hint_rate") || ""
+  };
+  var hint = parseFloat((p.hint_rate || "").replace(",", "."));
+  if (!isFinite(hint) || hint <= 0) hint = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var sellEl = $("sell"), buyEl = $("buy"), sendBtn = $("send"), liveEl = $("live"), statusEl = $("status");
+
+  function setText(id, value) { $(id).textContent = value || "—"; }
+  setText("route", p.route);
+  setText("pair", p.pair || (p.sell_coin && p.buy_coin ? p.sell_coin + "/" + p.buy_coin : ""));
+  setText("lvl", p.lvl);
+  $("sell-label").textContent = "Продал " + (p.sell_coin || "монету");
+  $("buy-label").textContent = "Купил " + (p.buy_coin || "монету");
+
+  function applyTheme(t) {
+    t = t || {};
+    var map = { "--bg": t.bg_color, "--text": t.text_color, "--hint": t.hint_color,
+                "--accent": t.button_color, "--accent-text": t.button_text_color,
+                "--card": t.secondary_bg_color };
+    Object.keys(map).forEach(function (k) {
+      if (map[k]) document.documentElement.style.setProperty(k, map[k]);
+    });
+  }
+
+  function parseAmount(el) {
+    var s = el.value.trim();
+    if (!s) return null;
+    if (!NUM_RE.test(s)) return NaN;
+    var v = parseFloat(s.replace(",", "."));
+    return v > 0 ? v : NaN;
+  }
+
+  function fmt(x, digits) {
+    return x.toLocaleString("ru-RU", { maximumFractionDigits: digits || 6 });
+  }
+
+  function command(sell, buy) {
+    return "done|" + p.route + "|" + p.lvl + " продал " + sell + " " + p.sell_coin +
+           " купил " + buy + " " + p.buy_coin;
+  }
+
+  var state = { sell: null, buy: null, text: "" };
+
+  function update() {
+    var s = parseAmount(sellEl), b = parseAmount(buyEl);
+    sellEl.classList.toggle("invalid", s !== null && isNaN(s));
+    buyEl.classList.toggle("invalid", b !== null && isNaN(b));
+    state.sell = (typeof s === "number" && !isNaN(s)) ? s : null;
+    state.buy = (typeof b === "number" && !isNaN(b)) ? b : null;
+
+    var ready = state.sell !== null && state.buy !== null;
+    if (!ready) {
+      liveEl.innerHTML = '<div class="muted">Введи обе суммы — здесь появится фактический курс сделки.</div>';
+    } else {
+      var rate = state.buy / state.sell;
+      var html = '<div>1 ' + p.sell_coin + ' = <span class="rate">' + fmt(rate) + '</span> ' + p.buy_coin + '</div>';
+      html += '<div>1 ' + p.buy_coin + ' = ' + fmt(1 / rate) + ' ' + p.sell_coin + '</div>';
+      if (hint) {
+        var dev = (rate / hint - 1) * 100;
+        var cls = Math.abs(dev) <= 1 ? "ok" : (Math.abs(dev) <= 3 ? "warn" : "bad");
+        html += '<div>Курс из сигнала: ' + fmt(hint) + '</div>';
+        html += '<div>Отклонение: <span class="delta ' + cls + '">' +
+                (dev >= 0 ? "+" : "") + fmt(dev, 2) + '%</span>' +
+                (cls === "bad" ? ' — проверь цифры' : '') + '</div>';
+      } else {
+        html += '<div class="muted">Курс из сигнала не передан — сравнение пропущено.</div>';
+      }
+      liveEl.innerHTML = html;
+    }
+    state.text = ready ? command(sellEl.value.trim().replace(",", "."), buyEl.value.trim().replace(",", ".")) : "";
+    sendBtn.disabled = !ready;
+    if (TG && TG.MainButton) {
+      if (ready) { TG.MainButton.enable(); TG.MainButton.show(); }
+      else { TG.MainButton.disable(); }
+    }
+  }
+
+  function shareFallback(text) {
+    var url = "https://t.me/share/url?text=" + encodeURIComponent(text);
+    if (TG && TG.openTelegramLink) {
+      TG.openTelegramLink(url);
+      return true;
+    }
+    return false;
+  }
+
+  function submit() {
+    if (!state.text) return;
+    if (TG && TG.initData) {
+      try {
+        TG.sendData(state.text);
+        return;
+      } catch (e) { /* sendData недоступен — переходим к публикации в чат */ }
+    }
+    if (shareFallback(state.text)) {
+      statusEl.textContent = "Выбери чат и отправь команду.";
+      statusEl.classList.remove("error");
+      return;
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(state.text).then(function () {
+        statusEl.textContent = "Команда скопирована: вставь её в чат с ботом.";
+        statusEl.classList.remove("error");
+      });
+    }
+    statusEl.textContent = state.text;
+    statusEl.classList.add("error");
+  }
+
+  sellEl.addEventListener("input", update);
+  buyEl.addEventListener("input", update);
+  sendBtn.addEventListener("click", submit);
+
+  if (TG) {
+    document.body.classList.add("tg");
+    TG.ready();
+    TG.expand();
+    applyTheme(TG.themeParams);
+    TG.onEvent("themeChanged", function () { applyTheme(TG.themeParams); });
+    TG.MainButton.setText("Записать сделку");
+    TG.MainButton.onClick(submit);
+    TG.MainButton.hide();
+  } else {
+    document.body.classList.add("no-tg");
+  }
+  update();
+})();
+</script>
+</body>
+</html>
